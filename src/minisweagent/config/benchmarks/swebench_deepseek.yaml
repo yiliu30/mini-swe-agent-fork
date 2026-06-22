@@ -1,0 +1,9 @@
+# DeepSeek v4 Flash model overrides for SWE-bench.
+# Merge on top of swebench.yaml via: -c swebench.yaml -c swebench_deepseek.yaml
+model:
+  model_name: "deepseek/deepseek-v4-flash"
+  set_cache_control: null          # Disable Anthropic cache-control injection
+  cost_tracking: "ignore_errors"   # Model not in LiteLLM cost registry
+  model_kwargs:
+    drop_params: true
+    parallel_tool_calls: true
