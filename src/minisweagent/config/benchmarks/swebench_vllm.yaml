@@ -30,6 +30,6 @@ model:
     api_base: "http://localhost:8000/v1"
     tool_choice: "required"              # Qwen3 won't use tools without being forced
     drop_params: true
-    max_tokens: 65536
+    max_tokens: 49152
     temperature: 0.0
     timeout: 900000

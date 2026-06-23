@@ -62,7 +62,7 @@ model:
     api_base: "http://localhost:8000/v1"
     tool_choice: "required"          # Qwen3 won't use tools unless forced
     drop_params: true
-    max_tokens: 65536                # ~64K for thinking + action; 32K is too tight
+    max_tokens: 49152                # verified: 49K fits under 262K cap when context grows to ~210K tokens
     temperature: 0.0
     timeout: 900000                  # 15 min per response
 ```
@@ -74,32 +74,85 @@ model:
 | `cost_tracking: "ignore_errors"` | `hosted_vllm/` models aren't in LiteLLM's cost registry. Without this, `RuntimeError`. |
 | `format_error_template` (custom) | Default template treats `finish_reason=tool_calls` as truncation. With `tool_choice: "required"`, every response ends that way — so only `length` is a real error. |
 | `tool_choice: "required"` | **Critical**. Qwen3 is a thinking model — it reasons indefinitely unless forced to call a tool. Without this it produces 0 actions. |
-| `max_tokens: 65536` | Sweet spot. 32K is too tight (thinking burns 20–30K before the tool call). Much higher causes first-response timeouts. |
+| `max_tokens: 49152` | Verified instances need this — context grows to ~210K after 150+ steps, leaving 262K−210K=52K. 49K fits. For Lite, 65536 works. |
 | `api_base` | Points at the local vLLM server. No API key needed. |
 
 ## 3. Run
 
-```bash
-mini-extra swebench \
-  -c swebench.yaml \
-  -c swebench_vllm.yaml \
-  --subset lite \
-  --split dev \
-  --slice "0:1" \
-  --agent.mode=yolo \
-  -w 1 \
-  -o ./output/qwen3_vllm_$(date +%Y%m%d_%H%M%S)
-```
-
-For the full sweepbench dataset:
+**SWE-bench Verified (test split):**
 ```bash
 mini-extra swebench \
   -c swebench.yaml -c swebench_vllm.yaml \
-  --subset lite --agent.mode=yolo -w 1 \
-  -o ./output/qwen3_lite_full_$(date +%Y%m%d_%H%M%S)
+  --subset verified --split test \
+  --agent.mode=yolo -w 1 \
+  -o ./output/qwen3_verified_$(date +%Y%m%d_%H%M%S)
 ```
 
-## 4. Key Knobs
+**SWE-bench Lite (dev split):**
+```bash
+mini-extra swebench \
+  -c swebench.yaml -c swebench_vllm.yaml \
+  --subset lite --split dev \
+  --agent.mode=yolo -w 1 \
+  -o ./output/qwen3_lite_$(date +%Y%m%d_%H%M%S)
+```
+
+Use `--slice "0:N"` to limit instances for smoke tests. Use `--redo-existing` to re-run already-completed instances.
+
+## 4. Evaluate
+
+After the run, submit `preds.json` to the SWE-bench evaluation harness:
+
+```bash
+# Local evaluation (uses Docker containers, runs test suite per instance)
+python -m swebench.harness.run_evaluation \
+  --dataset_name princeton-nlp/SWE-Bench_Verified \
+  --predictions_path output/<run>/preds.jsonl \
+  --split test --max_workers 2 \
+  --run_id qwen3-run
+```
+
+Convert `preds.json` to JSONL first:
+```bash
+python3 -c "
+import json
+preds = json.load(open('output/<run>/preds.json'))
+with open('output/<run>/preds.jsonl', 'w') as f:
+    for iid, d in preds.items():
+        if d.get('model_patch'):
+            f.write(json.dumps(d) + '\n')
+"
+```
+
+## 5. Benchmark Results (2026-06-22)
+
+Tested on SWE-bench Verified, 10 instances (astropy repo). Full output at `output/qwen3_verified_10_run2_20260622_151346/`.
+
+| Metric | Value |
+|--------|-------|
+| Instances run | 10 |
+| Patches submitted | 4 (40%) |
+| Resolved (passes all tests) | 2 (20% overall, 50% of submitted) |
+| Total wall time | 41 min |
+| Avg time per instance | ~4 min |
+
+**Resolved instances:**
+- `astropy__astropy-13453` — 66 actions, 1995-char patch
+- `astropy__astropy-14309` — 1619-char patch
+
+**Unresolved instances (patches submitted but tests failed):**
+- `astropy__astropy-13398` — 83 actions, 4126-char patch
+- `astropy__astropy-13977` — 54 actions, 927-char patch
+
+**Failures without patches:**
+
+| Exit status | Count | Why |
+|-------------|-------|-----|
+| `RepeatedFormatError` | 3 | Thinking model produced 0 tool calls — format error → retry loop → exhausted |
+| `LimitsExceeded` | 2 | 250 step limit hit before completing (13236: 250 actions, 14182: 250 actions) |
+| `ContextWindowExceeded` | 1 | Conversation grew past 262K tokens (12907: 168 actions before overflow) |
+
+## 6. Key Knobs
 
 | Knob | Effect |
 |------|--------|
@@ -109,13 +162,15 @@ mini-extra swebench \
 | `step_limit` | Default 250. Qwen3 needs it — it does ~150+ steps per instance. |
 | `temperature: 0.0` | Deterministic. Works fine. |
 
-## 5. Known Issues
+## 7. Known Issues
 
-- **Thinking model inconsistency**: Qwen3's chain-of-thought is unbounded. Some runs hit 148 steps with 0 errors, others fail at step 8 because thinking consumed the full `max_tokens` budget and the response arrived empty or truncated. This is inherent to thinking models — the agent loop can't control how much the model thinks.
+- **Thinking model inconsistency**: Qwen3's chain-of-thought is unbounded. Some runs hit 148 steps with 0 errors, others fail at step 8 because thinking consumed the full `max_tokens` budget and the response arrived empty or truncated. In the 10-instance Verified test, 3 instances failed this way (30%).
+- **Context window overflow**: After ~150-250 steps, accumulated messages + tool outputs can push the input past 210K tokens. With `max_tokens: 49152`, this breaches the 262K cap → `ContextWindowExceededError`. Affected 1/10 instances in testing. There is no fix — the model's context window is fixed.
 - **First-response timeout**: Without `--reasoning-parser qwen3`, the first response can run 10+ minutes because thinking + code block are serialized in `content`. Always use the reasoning parser.
-- **No cost tracking**: `cost_tracking: "ignore_errors"` means zero cost shown. For pass/fail ratio, submit `preds.json` to the SWE-bench evaluation harness (`sb-cli submit` or `swebench.harness.run_evaluation`).
+- **Step limit**: Default 250 may not be enough. 2/10 instances exhausted steps without submitting. Bumping to 300+ trades wall-clock time for coverage.
+- **No cost tracking**: `cost_tracking: "ignore_errors"` means zero cost shown.
 
-## 6. Quick Reference
+## 8. Quick Reference
 
 ```bash
 # Server
@@ -123,13 +178,17 @@ CUDA_VISIBLE_DEVICES=<N> vllm serve /path/to/model \
   --max-model-len 262144 --reasoning-parser qwen3 \
   --enable-auto-tool-choice --tool-call-parser hermes --port 8000
 
-# Run
+# Run (Verified)
 mini-extra swebench \
   -c swebench.yaml -c swebench_vllm.yaml \
-  --subset lite --slice "0:2" --agent.mode=yolo -w 1
+  --subset verified --split test \
+  --agent.mode=yolo -w 1 \
+  -o ./output/qwen3_verified_$(date +%Y%m%d_%H%M%S)
 
 # Evaluate (after run)
-sb-cli submit swe-bench_lite test \
-  --predictions_path output/<run>/preds.json \
-  --run_id qwen3-smoke
+python -m swebench.harness.run_evaluation \
+  --dataset_name princeton-nlp/SWE-Bench_Verified \
+  --predictions_path output/<run>/preds.jsonl \
+  --split test --max_workers 2 \
+  --run_id qwen3-run
 ```
