@@ -23,6 +23,109 @@ mini-extra swebench CLI
 
 The key integration point: LiteLLM's DeepSeek provider directed to the standard DeepSeek API via `DEEPSEEK_API_KEY`. (The Anthropic-compatible endpoint was not viable because it doesn't support custom tool definitions.)
 
+## Communication Protocol
+
+mini-swe-agent talks to the LLM server via **OpenAI-compatible HTTP REST**. There is no persistent connection, WebSocket, or streaming — each turn is a synchronous request/response.
+
+```
+agent.query(messages)
+  └─ litellm.completion(model=..., messages=[...], tools=[bash_tool], tool_choice="required", ...)
+       └─ httpx.POST http://<api_base>/v1/chat/completions
+            Headers: Content-Type: application/json, Authorization: Bearer <key>
+            Body: JSON (see below)
+       └─ returns LiteLLM response object
+```
+
+### Outbound Request (what the agent sends each turn)
+
+A POST to `/v1/chat/completions` with the **full message history** plus the tool definition:
+
+```json
+{
+  "model": "deepseek/deepseek-v4-flash",
+  "messages": [
+    {"role": "system", "content": "You are a helpful assistant..."},
+    {"role": "user",   "content": "<pr_description>...\n<instructions>...</instructions>"},
+    {"role": "assistant", "content": "", "tool_calls": [
+      {"id": "call_1", "type": "function",
+       "function": {"name": "bash", "arguments": "{\"command\": \"find /testbed ...\"}"}}
+    ]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "<returncode>0</returncode>\n<output>...</output>"},
+    {"role": "assistant", "content": "", "tool_calls": [...]},
+    {"role": "tool", "tool_call_id": "call_2", "content": "..."},
+    ... (accumulates every step)
+  ],
+  "tools": [{
+    "type": "function",
+    "function": {
+      "name": "bash",
+      "description": "Execute a bash command",
+      "parameters": {
+        "type": "object",
+        "properties": {"command": {"type": "string", "description": "The bash command to execute"}},
+        "required": ["command"]
+      }
+    }
+  }],
+  "tool_choice": "auto",
+  "max_tokens": 49152,
+  "temperature": 0.0
+}
+```
+
+**Key details:**
+- Messages accumulate **every turn**. By step 150, the `messages` array can hold 300+ entries (each step = assistant tool_call + tool result).
+- The `bash` tool is the **only** tool. The agent has exactly one action: execute a bash command.
+- `tool_choice` is typically `"auto"` (or `"required"` for models that won't call tools otherwise, like Qwen3).
+- API key comes from the `DEEPSEEK_API_KEY` environment variable, read automatically by LiteLLM. No API key is needed for local vLLM servers.
+
+### Inbound Response (what the model returns)
+
+```json
+{
+  "id": "chatcmpl-xxx",
+  "choices": [{
+    "finish_reason": "tool_calls",
+    "message": {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-bbef4a4c65ac7640",
+          "type": "function",
+          "function": {
+            "name": "bash",
+            "arguments": "{\"command\": \"find /testbed -type f -name \\\"*.py\\\" | xargs grep -l L031\"}"
+          }
+        }
+      ],
+      "reasoning_content": "Let me understand the task. The PR description is about..."
+    }
+  }],
+  "usage": {"prompt_tokens": 2585, "completion_tokens": 159}
+}
+```
+
+**Response parsing** (in `LitellmModel.query()`):
+1. The raw `response.choices[0].message` is deserialized by LiteLLM.
+2. `parse_toolcall_actions()` extracts `tool_calls` → parses JSON arguments → returns `[{"command": "find /testbed ..."}]`.
+3. On format error (no tool calls, unknown tool, malformed JSON), the `format_error_template` is rendered and appended to messages as a user error prompt, and the agent retries.
+4. The full raw response is stored in `message["extra"]["response"]` for trajectory recording.
+
+### Observation Format (command output)
+
+After the agent executes the command in the Docker container, the output is formatted as:
+
+```
+<returncode>0</returncode>
+<output>
+find /testbed -type f -name "*.py" ...
+... (command stdout/stderr, max 10,000 chars)
+</output>
+```
+
+This rendered string is appended to `messages` as a `{"role": "tool", "tool_call_id": "...", "content": "..."}` entry before the next turn.
+
 ## Agent Loop
 
 mini-swe-agent runs a tight step loop per instance:
