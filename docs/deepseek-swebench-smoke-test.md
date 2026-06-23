@@ -23,6 +23,50 @@ mini-extra swebench CLI
 
 The key integration point: LiteLLM's DeepSeek provider directed to the standard DeepSeek API via `DEEPSEEK_API_KEY`. (The Anthropic-compatible endpoint was not viable because it doesn't support custom tool definitions.)
 
+## Agent Loop
+
+mini-swe-agent runs a tight step loop per instance:
+
+```
+┌─ step() ──────────────────────────────────────────┐
+│                                                     │
+│  1. query()                                         │
+│     └─ model.query(messages)                        │
+│        └─ litellm.completion(tools=[BASH_TOOL])     │
+│           └─ POST https://api.deepseek.com/v1/...   │
+│                                                     │
+│  2. execute_actions()                               │
+│     └─ for each tool_call in response:              │
+│        └─ env.execute("bash -c", command)           │
+│           └─ docker exec <container> bash -c "..."  │
+│                                                     │
+│  3. observe()                                       │
+│     └─ append command output to messages            │
+│        (returncode + stdout/stderr, max 10K chars)   │
+│                                                     │
+│  4. repeat until:                                   │
+│     - model calls submit (exit)                     │
+│     - step_limit exceeded                           │
+│     - cost_limit exceeded                           │
+│     - context window overflow                       │
+│     - 3 consecutive format errors                   │
+│                                                     │
+└─────────────────────────────────────────────────────┘
+```
+
+**Key objects:**
+- **Model** (`LitellmModel`): wraps `litellm.completion()` with the `bash` tool defined as an OpenAI-format function call. Sends the full message history each turn.
+- **Environment** (`DockerEnvironment`): each instance gets a fresh Docker container with the repo at `/testbed`. Commands execute via `docker exec`, outputs are captured and returned.
+- **Agent** (`DefaultAgent`): orchestrates the loop. Renders Jinja2 templates for the system prompt and task prompt, manages step/cost limits, tracks messages.
+
+**Submission:** When the model decides it's done, it must run the exact command:
+```bash
+echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt
+```
+The environment detects the magic string and extracts the patch (everything after it) as the submission. The agent exits the loop with `exit_status: Submitted`.
+
+**Message accumulation:** Every step appends to the message list — system prompt → task → assistant(tool_call) → user(command output) → assistant(tool_call) → ... This grows linearly. For complex instances (150+ steps), the accumulated context can reach 200K+ tokens, approaching the model's context window limit.
+
 ## Prerequisites
 
 - Docker installed and running
