@@ -1,0 +1,16 @@
+# DeepSeek V4 Flash via local vLLM model overrides for SWE-bench.
+# Merge on top of swebench.yaml via: -c swebench.yaml -c swebench_deepseek_local.yaml
+model:
+  model_name: "hosted_vllm//storage/yiliu7/deepseek-ai/DeepSeek-V4-Flash"
+  cost_tracking: "ignore_errors"         # Local model not in cost registry
+  model_kwargs:
+    api_base: "http://localhost:8000/v1"
+    drop_params: true
+    max_tokens: 49152
+    temperature: 1.0
+    top_p: 0.95
+    timeout: 900000
+    extra_body:
+      chat_template_kwargs:
+        thinking: true
+        reasoning_effort: high

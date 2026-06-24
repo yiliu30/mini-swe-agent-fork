@@ -30,6 +30,9 @@ model:
     api_base: "http://localhost:8000/v1"
     tool_choice: "required"              # Qwen3 won't use tools without being forced
     drop_params: true
-    max_tokens: 49152
-    temperature: 0.0
+    max_tokens: 49152                     # Verified: fits under 262K cap w/ ~210K input
+    temperature: 1.0                     # Match Qwen official SWE-bench settings
+    top_p: 0.95                          # Qwen official
     timeout: 900000
+    extra_body:
+      preserve_thinking: true            # Keep reasoning across turns (Qwen3 critical)

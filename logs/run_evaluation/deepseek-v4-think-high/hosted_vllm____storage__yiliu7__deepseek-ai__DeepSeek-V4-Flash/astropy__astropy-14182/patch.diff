@@ -1,0 +1,29 @@
+diff --git a/astropy/io/ascii/rst.py b/astropy/io/ascii/rst.py
+index abdeba8ef..64eb928a4 100644
+--- a/astropy/io/ascii/rst.py
++++ b/astropy/io/ascii/rst.py
+@@ -57,10 +57,21 @@ class RST(FixedWidth):
+     data_class = SimpleRSTData
+     header_class = SimpleRSTHeader
+ 
+-    def __init__(self):
+-        super().__init__(delimiter_pad=None, bookend=False)
++    def __init__(self, header_rows=None):
++        super().__init__(delimiter_pad=None, bookend=False, header_rows=header_rows)
+ 
+     def write(self, lines):
+         lines = super().write(lines)
+-        lines = [lines[1]] + lines + [lines[1]]
++        # Find the separator line (the one with the position character '=')
++        # This line is added by FixedWidthData.write() when position_line is not None.
++        # We need to find it dynamically because its index changes based on
++        # the number of header_rows.
++        for i, line in enumerate(lines):
++            stripped = line.replace(' ', '')
++            if stripped and all(c == '=' for c in stripped):
++                sep = line
++                break
++        else:
++            sep = lines[1]
++        lines = [sep] + lines + [sep]
+         return lines
