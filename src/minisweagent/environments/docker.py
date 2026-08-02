@@ -33,7 +33,7 @@ class DockerEnvironmentConfig(BaseModel):
     """
     container_timeout: str = "2h"
     """Max duration to keep container running. Uses the same format as the sleep command."""
-    pull_timeout: int = 120
+    pull_timeout: int = 600
     """Timeout in seconds for pulling images."""
     interpreter: list[str] = ["bash", "-lc"]
     """Interpreter to use to execute commands. Default is ["bash", "-lc"].
@@ -88,13 +88,27 @@ class DockerEnvironment:
             self.config.container_timeout,
         ]
         self.logger.debug(f"Starting container with command: {shlex.join(cmd)}")
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=self.config.pull_timeout,  # docker pull might take a while
-            check=True,
-        )
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.config.pull_timeout,  # docker pull might take a while
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            stdout = exc.stdout.strip()
+            stderr = exc.stderr.strip()
+            details = [
+                f"failed to start container {container_name}",
+                f"command={shlex.join(cmd)}",
+                f"returncode={exc.returncode}",
+            ]
+            if stdout:
+                details.append(f"stdout={stdout}")
+            if stderr:
+                details.append(f"stderr={stderr}")
+            raise RuntimeError("; ".join(details)) from exc
         self.logger.info(f"Started container {container_name} with ID {result.stdout.strip()}")
         self.container_id = result.stdout.strip()
 

@@ -50,6 +50,7 @@ def test_docker_environment_config_defaults(executable):
     assert config.env == {}
     assert config.forward_env == []
     assert config.timeout == 30
+    assert config.pull_timeout == 600
     assert config.executable == executable
 
 

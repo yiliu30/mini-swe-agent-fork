@@ -44,34 +44,77 @@ CUDA_VISIBLE_DEVICES=2,3 \
 
 **GPU**: 2 GPUs needed (B200, 183 GB each). Model uses ~74 GiB per GPU. Startup takes ~30 minutes first time (JIT kernel compilation), or ~2 minutes with autotune disabled (see below).
 
-### Funnel Dense Backend (Experimental)
+### Funnel Dense Backend (Current BKC)
 
-An experimental sparse indexer backend is available in the dev vLLM build at `/home/yiliu7/workspace/vllm/.venv/`. Install the dependency:
+The old host-side `cp -r funnel_topk ... site-packages` flow is stale for the
+current turbo funnel path. The working BKC is the Docker + precompiled vLLM
+setup from `/home/yiliu7/workspace/vllm/deepseek_v4_flash_docker_cmds.sh`:
+
+- Docker image: `nvcr.io/nvidia/pytorch:26.06-py3`
+- Container: `vllm-ds-precompiled-smoke`
+- vLLM install: editable, precompiled mode
+- funnel-topk install: editable from `/workspace/funnel-topk`
+
+Start the server with funnel enabled:
 
 ```bash
-cp -r /home/yiliu7/workspace/funnel-topk/funnel_topk /home/yiliu7/workspace/vllm/.venv/lib/python3.12/site-packages/
+docker exec vllm-ds-precompiled-smoke bash -lc '
+  cd /workspace/vllm &&
+  source /opt/vllm-precompiled-venv/bin/activate &&
+  export VLLM_SPARSE_INDEXER_PREFILL_TOPK_BACKEND=funnel_dense \
+         VLLM_SPARSE_INDEXER_PREFILL_TOPK_FUNNEL_MODE=turbo \
+         FLASHINFER_DISABLE_VERSION_CHECK=1 \
+         NCCL_IB_DISABLE=1 \
+         NCCL_P2P_DISABLE=1 \
+         NCCL_SHM_DISABLE=1 \
+         TORCH_NCCL_BLOCKING_WAIT=1 \
+         VLLM_DISABLE_PYNCCL=1 \
+         VLLM_ALLREDUCE_USE_SYMM_MEM=0 \
+         VLLM_DEEP_GEMM_WARMUP=skip \
+         VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR=/root/.cache/vllm_flashinfer_autotune \
+         CUDA_VISIBLE_DEVICES=0,1 &&
+  /opt/vllm-precompiled-venv/bin/vllm serve \
+    /storage/yiliu7/deepseek-ai/DeepSeek-V4-Flash/ \
+    --trust-remote-code \
+    --kv-cache-dtype fp8 \
+    --block-size 256 \
+    --enable-expert-parallel \
+    --tensor-parallel-size 2 \
+    --attention_config.use_fp4_indexer_cache=True \
+    --tokenizer-mode deepseek_v4 \
+    --reasoning-parser deepseek_v4 \
+    --gpu-memory-utilization 0.75 \
+    --kernel-config.enable_flashinfer_autotune=False \
+    --kernel-config.enable_jit_warmup=False \
+    --kernel-config.enable_cutedsl_warmup=False \
+    --disable-custom-all-reduce \
+    --port 8000
+'
 ```
 
-Start with funnel_dense + disabled autotune for faster startup:
+Current behavior in vLLM:
 
-```bash
-VLLM_SPARSE_INDEXER_PREFILL_TOPK_BACKEND=funnel_dense \
-CUDA_HOME=/usr/local/cuda-13 \
-CUDA_VISIBLE_DEVICES=0,1 \
-/home/yiliu7/workspace/vllm/.venv/bin/vllm serve \
-  /storage/yiliu7/deepseek-ai/DeepSeek-V4-Flash \
-  --trust-remote-code --kv-cache-dtype fp8 --block-size 256 \
-  --tensor-parallel-size 2 --max-model-len 131072 \
-  --tokenizer-mode deepseek_v4 --tool-call-parser deepseek_v4 \
-  --enable-auto-tool-choice --reasoning-parser deepseek_v4 \
-  --kernel-config.enable_flashinfer_autotune=False \
-  --port 8000
-```
+- `funnel_dense` calls `top_k_per_row_prefill_funnel_v1`
+- `VLLM_SPARSE_INDEXER_PREFILL_TOPK_FUNNEL_MODE=turbo` is required for the new
+  turbo kernel path
+- `DeepSeek-V4-Flash` uses `index_topk=512`
+- if the funnel adapter fails, vLLM raises instead of silently falling back
 
-Verify: `grep "funnel_dense" /tmp/vllm_funnel_*.log` → `Using funnel_dense backend for top-k prefill.`
+Verification:
 
-**Benefits**: Same accuracy as native, ~2 min startup (vs ~30 min), slightly higher throughput.
-**Requirements**: Dev vLLM build at `/home/yiliu7/workspace/vllm/.venv/` with `funnel_topk` installed.
+- call site: `/home/yiliu7/workspace/vllm/vllm/model_executor/layers/sparse_attn_indexer.py`
+- audit log:
+  `/home/yiliu7/workspace/vllm/logs/ds_sweep/prefill_v1_audit.log`
+- expected lines:
+  `top_k_per_row_prefill_funnel_v1 ... top_k=512 mode=turbo`
+
+Current GSM8K check in Docker (`2026-08-02`):
+
+- with funnel: `flexible 0.9507 +- 0.0060`, `strict 0.9515 +- 0.0059`
+- without funnel: `flexible 0.9507 +- 0.0060`, `strict 0.9507 +- 0.0060`
+
+Reference note:
+`/home/yiliu7/workspace/funnel-topk/bench_res/deepseek_v4_flash_gsm8k_docker_20260802.md`
 
 ## 3. Config File
 
@@ -431,16 +474,33 @@ CUDA_HOME=/usr/local/cuda-13 CUDA_VISIBLE_DEVICES=2,3 \
   --tokenizer-mode deepseek_v4 --tool-call-parser deepseek_v4 \
   --enable-auto-tool-choice --reasoning-parser deepseek_v4 --port 8000
 
-# Server (funnel_dense — dev vllm, faster startup)
-VLLM_SPARSE_INDEXER_PREFILL_TOPK_BACKEND=funnel_dense \
-CUDA_HOME=/usr/local/cuda-13 CUDA_VISIBLE_DEVICES=0,1 \
-/home/yiliu7/workspace/vllm/.venv/bin/vllm serve \
-  /storage/yiliu7/deepseek-ai/DeepSeek-V4-Flash \
-  --trust-remote-code --kv-cache-dtype fp8 --block-size 256 \
-  --tensor-parallel-size 2 --max-model-len 131072 \
-  --tokenizer-mode deepseek_v4 --tool-call-parser deepseek_v4 \
-  --enable-auto-tool-choice --reasoning-parser deepseek_v4 \
-  --kernel-config.enable_flashinfer_autotune=False --port 8000
+# Server (funnel_dense turbo, Docker BKC)
+docker exec vllm-ds-precompiled-smoke bash -lc '
+  cd /workspace/vllm &&
+  source /opt/vllm-precompiled-venv/bin/activate &&
+  export VLLM_SPARSE_INDEXER_PREFILL_TOPK_BACKEND=funnel_dense \
+         VLLM_SPARSE_INDEXER_PREFILL_TOPK_FUNNEL_MODE=turbo \
+         FLASHINFER_DISABLE_VERSION_CHECK=1 \
+         NCCL_IB_DISABLE=1 \
+         NCCL_P2P_DISABLE=1 \
+         NCCL_SHM_DISABLE=1 \
+         TORCH_NCCL_BLOCKING_WAIT=1 \
+         VLLM_DISABLE_PYNCCL=1 \
+         VLLM_ALLREDUCE_USE_SYMM_MEM=0 \
+         VLLM_DEEP_GEMM_WARMUP=skip \
+         CUDA_VISIBLE_DEVICES=0,1 &&
+  /opt/vllm-precompiled-venv/bin/vllm serve \
+    /storage/yiliu7/deepseek-ai/DeepSeek-V4-Flash/ \
+    --trust-remote-code --kv-cache-dtype fp8 --block-size 256 \
+    --enable-expert-parallel --tensor-parallel-size 2 \
+    --attention_config.use_fp4_indexer_cache=True \
+    --tokenizer-mode deepseek_v4 --reasoning-parser deepseek_v4 \
+    --gpu-memory-utilization 0.75 \
+    --kernel-config.enable_flashinfer_autotune=False \
+    --kernel-config.enable_jit_warmup=False \
+    --kernel-config.enable_cutedsl_warmup=False \
+    --disable-custom-all-reduce --port 8000
+'
 
 # Run (10 instances)
 source /home/yiliu7/workspace/venvs/omni/bin/activate
