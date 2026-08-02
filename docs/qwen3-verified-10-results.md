@@ -342,3 +342,49 @@ Same 4 unresolved across all runs:
 | Qwen3 35B (temp=1.0) | Run 5 | 90% | 50% | 1 |
 | Qwen3 27B | Run 4 | 20% | 10% | 2 |
 | **DeepSeek V4 Flash** | **Run 6** | **100%** | **60%** | **0** |
+
+---
+
+# Run 8: DeepSeek V4 Flash — Think Max (2026-06-24)
+
+## Config
+
+| Parameter | Value |
+|-----------|-------|
+| `reasoning_effort` | max |
+| `max-model-len` | 393216 (384K) |
+| Context | 384K (up from 128K) |
+
+## Results
+
+| Metric | Value |
+|--------|-------|
+| Submitted | 10/10 (100%) |
+| Resolved | **5/10 (50%)** |
+| Avg actions | 54 |
+| Wall time | ~25 min (5 parallel) |
+
+## Per-Instance
+
+| instance | actions | patch | resolved |
+|---|---|---|---|
+| astropy-12907 | 13 | 504c | ✓ |
+| astropy-13033 | 42 | 1664c | ✗ |
+| astropy-13236 | 97 | 866c | **✗** (lost!) |
+| astropy-13398 | 90 | 5294c | ✗ |
+| astropy-13453 | 39 | 408c | ✓ |
+| astropy-13579 | 46 | 1833c | ✓ |
+| astropy-13977 | 58 | 727c | ✗ |
+| astropy-14096 | 43 | 1124c | ✓ |
+| astropy-14182 | 68 | 903c | ✗ |
+| astropy-14309 | 41 | 2040c | ✓ |
+
+## Final Thinking Mode Comparison
+
+| Mode | Resolved | Actions |
+|------|----------|---------|
+| No-Think | 6/10 (60%) | 35 |
+| Think High | 6/10 (60%) | 32 |
+| Think Max | **5/10 (50%)** | **54** |
+
+**Think Max is the worst mode** — more actions, lower accuracy. Lost 13236 (resolved in all other runs). Deeper reasoning makes the model over-think.

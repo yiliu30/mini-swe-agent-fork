@@ -10,7 +10,3 @@ model:
     temperature: 1.0
     top_p: 0.95
     timeout: 900000
-    extra_body:
-      chat_template_kwargs:
-        thinking: true
-        reasoning_effort: high
