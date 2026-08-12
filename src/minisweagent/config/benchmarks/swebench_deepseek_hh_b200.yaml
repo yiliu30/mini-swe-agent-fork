@@ -1,0 +1,14 @@
+# DeepSeek V4 Flash via remote hh-b200 vLLM model overrides for SWE-bench.
+# Merge on top of swebench.yaml via: -c swebench.yaml -c swebench_deepseek_hh_b200.yaml
+model:
+  model_name: "hosted_vllm/DeepSeek-V4-Flash"
+  cost_tracking: "ignore_errors"
+  model_kwargs:
+    api_base: "http://127.0.0.1:18000/v1"
+    drop_params: true
+    max_tokens: 49152
+    temperature: 1.0
+    top_p: 0.95
+    timeout: 900000
+environment:
+  pull_timeout: 600
